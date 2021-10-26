@@ -1,0 +1,96 @@
+---
+title: DNADerivedData extension data access
+date: "`r Sys.Date()`"
+author: Pieter Provoost, Saara Suominen
+output: (function(...) {
+  rmdformats::robobook(toc_depth = 4, pandoc_args = c("+RTS", "-K2000m", "-RTS"), ...) })
+editor_options: 
+  chunk_output_type: console
+knit: (function(inputFile, encoding) {
+  rmarkdown::render(inputFile, encoding = encoding, output_dir = "docs") })  
+---
+
+In this notebook we will show how to access OBIS data shared using the new [DNADerivedData extension](https://rs.gbif.org/extension/gbif/1.0/dna_derived_data_2021-07-05.xml).
+
+# Installing the robis package
+
+First install the [robis package](https://github.com/iobis/robis). If the package is already installed, make sure the version is 2.10.0 or higher.
+
+```{r message=FALSE, warning=FALSE}
+if (!"robis" %in% rownames(installed.packages())) {
+  remotes::install_github("iobis/robis")
+} else if (packageVersion("robis") < "2.10.0") {
+  knitr::knit_exit()
+}
+```
+
+We will also need the following packages:
+
+```{r message=FALSE, warning=FALSE}
+library(robis)
+library(dplyr)
+library(ape)
+library(ips)
+library(dendextend)
+library(ggplot2)
+library(ggtree)
+library(knitr)
+```
+
+# Finding sequence based data
+
+Before we fetch any occurrence data let's first find out which datasets in OBIS are using the DNADerivedData extension. The `dataset()` function takes many of the same parameters as the `occurrence()` function, including `hasextensions` which allows us to limit our search to occurrences which have linked extension records of a specific type. Possible values include `MeasurementOrFact` and `DNADerivedData`.
+
+```{r message=FALSE, warning=FALSE}
+dna_datasets <- dataset(hasextensions = "DNADerivedData")
+dna_datasets %>%
+  select(url, title, records) %>%
+  kable()
+
+knitr::knit_exit()
+```
+
+```{r message=FALSE, warning=FALSE}
+
+# get data from OBIS
+
+occ <- occurrence(hasextensions = "DNADerivedData", extensions = "DNADerivedData") %>%
+  filter(!is.na(phylum))
+
+occ %>%
+  group_by(phylum) %>%
+  summarize(species = length(unique(speciesid)), records = n()) %>%
+  arrange(desc(species))
+
+dna <- unnest_extension(occ, "DNADerivedData", fields = c("id", "scientificName", "phylum", "class", "order", "family", "genus", "species", "date_year"))
+
+# subset data
+
+dna_subset <- dna %>%
+  filter(phylum == "Ochrophyta" & !is.na(species)) %>%
+  head(100)
+
+# convert to ape DNAbin
+
+sequences <- sapply(strsplit(as.character(dna_subset$DNA_sequence), ""), tolower)
+names(sequences) <- dna_subset$id
+sequences <- ape::as.DNAbin(sequences)
+sequences
+
+# align with mafft
+
+ali_mafft <- ips::mafft(sequences, method = "auto")
+
+# dist.dna
+
+distances <- ape::dist.dna(ali_mafft, model = "raw")
+
+# For flexible phylogenetic tree visualization, can build on this new package:
+
+tree <- njs(distances) %>%
+  left_join(dna_subset %>% select(id, year = date_year, species), by = c("label" = "id"))
+
+ggtree(tree, layout = "circular", cex = 0.3) +
+  geom_tiplab(size = 2, aes(label = species, color = year)) +
+  scale_color_viridis_c(option = "magma", end = 0.9)
+```
