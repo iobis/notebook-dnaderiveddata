@@ -19,15 +19,14 @@ occ %>%
 
 dna <- dna_records(occ, fields = c("id", "scientificName", "phylum", "class", "order", "family", "genus", "species", "eventDate"))
 
-# random subset data
+# subset data (first 100 sequences)
 
-dna_subset <- dna[sample(1:nrow(dna), 150),]
-
+dna_subset <- dna[1:100,]
 
 # convert to ape DNAbin
 
-sequences <- t(sapply(strsplit(as.character(dna_subset), ""), tolower))
-rownames(sequences) <- paste0(substr(dna_subset$id, 1, 5), " - ", dna_subset$phylum)
+sequences <- sapply(strsplit(as.character(dna_subset$DNA_sequence), ""), tolower)
+names(sequences) <- paste0(substr(dna_subset$id, 1, 5), " - ", dna_subset$phylum)
 sequences <- ape::as.DNAbin(sequences)
 sequences
 
