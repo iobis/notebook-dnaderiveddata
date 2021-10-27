@@ -3,16 +3,17 @@ title: DNADerivedData extension data access
 date: "`r Sys.Date()`"
 author: Pieter Provoost, Saara Suominen
 output: (function(...) {
-  rmdformats::robobook(toc_depth = 4, pandoc_args = c("+RTS", "-K2000m", "-RTS"), ...) })
+  rmdformats::robobook(toc_depth = 4, fig_caption = FALSE, pandoc_args = c("+RTS", "-K2000m", "-RTS"), ...) })
 editor_options: 
   chunk_output_type: console
 knit: (function(inputFile, encoding) {
   rmarkdown::render(inputFile, encoding = encoding, output_dir = "docs") })  
 ---
 
-In this notebook we will show how to access OBIS data shared using the new [DNADerivedData extension](https://rs.gbif.org/extension/gbif/1.0/dna_derived_data_2021-07-05.xml).
+In this notebook we will explore data published to OBIS using the new [DNADerivedData extension](https://rs.gbif.org/extension/gbif/1.0/dna_derived_data_2021-07-05.xml). This notebook is available at [https://iobis.github.io/notebook-dnaderiveddata/](https://iobis.github.io/notebook-dnaderiveddata/).
 
-# Installing the robis package
+# Using R
+## Installing the robis package
 
 First install the [robis package](https://github.com/iobis/robis). If the package is already installed, make sure the version is 2.10.0 or higher.
 
@@ -29,68 +30,114 @@ We will also need the following packages:
 ```{r message=FALSE, warning=FALSE}
 library(robis)
 library(dplyr)
-library(ape)
-library(ips)
-library(dendextend)
 library(ggplot2)
-library(ggtree)
 library(knitr)
+library(ggtree)
 ```
 
-# Finding sequence based data
+## Finding sequence based data
 
 Before we fetch any occurrence data let's first find out which datasets in OBIS are using the DNADerivedData extension. The `dataset()` function takes many of the same parameters as the `occurrence()` function, including `hasextensions` which allows us to limit our search to occurrences which have linked extension records of a specific type. Possible values include `MeasurementOrFact` and `DNADerivedData`.
 
 ```{r message=FALSE, warning=FALSE}
 dna_datasets <- dataset(hasextensions = "DNADerivedData")
+
 dna_datasets %>%
   select(url, title, records) %>%
   kable()
-
-knitr::knit_exit()
 ```
 
 ```{r message=FALSE, warning=FALSE}
+mapview::mapview(sf::st_as_sfc(dna_datasets$extent, crs = 4326))
+```
 
-# get data from OBIS
+## Fetching sequence based data
 
-occ <- occurrence(hasextensions = "DNADerivedData", extensions = "DNADerivedData") %>%
-  filter(!is.na(phylum))
+Let's fetch all occurrences from the 18S Monterey Bay Time Series dataset by using the `datasetid` parameter. Alternatively, set `hasextensions` to `DNADerivedData`. Also set the `extensions` parameter to ensure that the nested extension records are included in the results.
 
+```{r message=FALSE, warning=FALSE}
+occ <- occurrence(datasetid = "62b97724-da17-4ca7-9b26-b2a22aeaab51", extensions = "DNADerivedData")
+occ
+```
+
+Let's take a look at the taxonomic composition of our dataset:
+
+```{r message=FALSE, warning=FALSE}
 occ %>%
   group_by(phylum) %>%
   summarize(species = length(unique(speciesid)), records = n()) %>%
   arrange(desc(species))
+```
 
-dna <- unnest_extension(occ, "DNADerivedData", fields = c("id", "scientificName", "phylum", "class", "order", "family", "genus", "species", "date_year"))
+## Extracting DNADerivedData records
 
-# subset data
+The DNADerivedData records are currently nested within the occurrences we fetched from OBIS. To extract the extension records we can use the `unnest_extension()` function. Pass any fields from the occurrence table you would like to keep using the `fields` parameter.
 
+```{r message=FALSE, warning=FALSE}
+dna <- unnest_extension(occ, "DNADerivedData", fields = c("id", "phylum", "class", "order", "family", "genus", "species", "date_year"))
+dna
+```
+
+Let's take a look at some properties of the sequence records.
+
+```{r message=FALSE, warning=FALSE}
+dna %>%
+  group_by(target_gene, pcr_primer_name_forward, pcr_primer_name_reverse) %>%
+  summarize(records = n()) %>%
+  kable()
+```
+
+## Working with DNADerivedData records
+
+This is a quick demo of working with sequences from the DNADerivedData extension. For the remainder of the notebook I will work with a subset of the sequence data.
+
+```{r message=FALSE, warning=FALSE}
 dna_subset <- dna %>%
   filter(phylum == "Ochrophyta" & !is.na(species)) %>%
   head(100)
+```
 
-# convert to ape DNAbin
+To be able to make use of existing bioinformatics packages we first need to convert our `DNA_sequence` column to a `DNAbin` object. This can be done using `as.DNAbin` function from the `ape` (Analyses of Phylogenetics and Evolution) package.
 
+```{r message=FALSE, warning=FALSE}
 sequences <- sapply(strsplit(as.character(dna_subset$DNA_sequence), ""), tolower)
 names(sequences) <- dna_subset$id
 sequences <- ape::as.DNAbin(sequences)
 sequences
+```
 
-# align with mafft
+Now we can align the sequences using MAFFT. The `ips` (Interfaces to Phylogenetic Software in R) package provides an interface to the MAFFT software.
 
-ali_mafft <- ips::mafft(sequences, method = "auto")
+```{r message=FALSE, warning=FALSE}
+aligned <- ips::mafft(sequences, method = "auto")
+aligned
+```
 
-# dist.dna
+Let's visualize the aligned sequences:
 
-distances <- ape::dist.dna(ali_mafft, model = "raw")
+```{r message=FALSE, warning=FALSE}
+ggmsa::ggmsa(aligned %>% as.list() %>% setNames(substr(names(sequences), 1, 5)), color = "Chemistry_NT", seq_name = TRUE) + theme(text = element_text(size = 5))
+```
 
-# For flexible phylogenetic tree visualization, can build on this new package:
+Finally, we can calculate a distance matrix and construct a tree using `dist.dna` and `njs`.
 
-tree <- njs(distances) %>%
+```{r message=FALSE, warning=FALSE}
+distances <- ape::dist.dna(aligned, model = "raw")
+
+tree <- ape::njs(distances) %>%
   left_join(dna_subset %>% select(id, year = date_year, species), by = c("label" = "id"))
 
 ggtree(tree, layout = "circular", cex = 0.3) +
   geom_tiplab(size = 2, aes(label = species, color = year)) +
   scale_color_viridis_c(option = "magma", end = 0.9)
 ```
+
+# Using the mapper
+
+DNADerivedData extension records can also be included in data downloads from the [mapper](https://mapper.obis.org/). To do so, tick the DNADerivedData checkbox in the download confirmation form.
+
+![mapper](images/mapper.png)
+
+The resulting archive will include CSV files for the occurrences as well as for the selected extensions. The occurrence and extension tables can be joined using the `id` column.
+
+![mapper](images/download.png)
